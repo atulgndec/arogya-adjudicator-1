@@ -2,13 +2,17 @@
 
 A simple Python port of the AI Studio workstation (React + Express). It keeps the original's module layout, so you can read the two side by side.
 
+- Source code: https://github.com/suhanijain/arogya-adjudicator-1
+- Live deployment (Render): https://arogya-adjudicator.onrender.com/ (API docs at `/docs`)
+- Docker build, run and Compose guide: `README-docker.md`
+
 | TypeScript | Python | Notes |
 |---|---|---|
 | `src/types/adjudication.ts` | `arogya/types/adjudication.py` | pydantic v2, same camelCase JSON |
 | `lib/adjudicationCalculator.ts` | `lib/adjudication_calculator.py` | Decimal, whole-rupee rounding like `Math.round` |
 | `lib/langgraph.ts` (hand-made) | `lib/claims_graph.py` | real **LangGraph**, `interrupt()` for the adjudicator |
 | `lib/vectorDb.ts` (fake embeddings) | `lib/policy_kb.py` | **BM25** (`rank_bm25`) behind a **LangChain** `BaseRetriever` |
-| `/api/gemini/*` in `server.ts` | `lib/llm.py` | LangChain chains, **LangSmith** `@traceable` with masking |
+| `/api/gemini/*` in `server.ts` | `lib/llm.py` | LangChain chains on **Google Gemini** (`gemini-3.6-flash`), **LangSmith** `@traceable` with masking |
 | `lib/documentExtractor` | `lib/document_extractor.py` | rules first, **DSPy** `Predict` only for lines the rules can't place |
 | `lib/claimsMetrics.ts` | `lib/claims_metrics.py` | **Prometheus** metrics, **Grafana** dashboard in `ops/` |
 | `lib/fraudDetector.ts`, `reflexionEngine.ts`, `claimsDb.ts`, `tariffDb.ts` | same names in snake_case | |
@@ -22,7 +26,29 @@ make serve           # app at http://localhost:8000 , API docs at /docs
 make eval            # DSPy Evaluate on the extractor (80/80)
 docker compose up    # api + Prometheus (9090) + Grafana (3000, dashboard "Arogya claims")
 ```
-Models are open source, served by [Ollama](https://ollama.com): `ollama pull llama3.1:8b` (or set `OLLAMA_MODEL`). LangChain uses `ChatOllama`; DSPy uses the same model through `llm.configure_dspy()`. If Ollama isn't running, the model steps use deterministic text and everything else works. Set `LANGSMITH_TRACING=true` and a key to trace; health details are masked before they leave.
+
+### Model: Google Gemini
+Model calls use **Google Gemini** (`gemini-3.6-flash` by default) through the Gemini API. LangChain uses `ChatGoogleGenerativeAI` (package `langchain-google-genai`); DSPy uses the same model through `llm.configure_dspy()` (`dspy.LM("gemini/<model>")`). Get a key from [Google AI Studio](https://aistudio.google.com/app/apikey) and put it in a `.env` file (never commit it):
+
+```
+GEMINI_API_KEY=your-key-here
+ADJUDICATOR_KEY=change-me
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | none | Gemini API key. Without it, model steps use deterministic text |
+| `GEMINI_MODEL` | `gemini-3.6-flash` | Model for case analysis and settlement notes |
+| `ADJUDICATOR_KEY` | `demo-key` | Adjudicator access key. Set your own |
+| `LANGSMITH_TRACING` | off | Set to `true` with a LangSmith key to trace; health details are masked before they leave |
+
+Notes on the Gemini model path:
+- **Fallback:** if there is no key, or a call fails (quota, network, bad key), the model steps use deterministic text and everything else works. The result then shows `deterministic-rules (model call failed: ...)`; the full error is written to the application log (`Gemini call failed`).
+- **Parameters:** `lib/llm.py` sets no `temperature`, `top_p` or `top_k`, because Google has deprecated them for Gemini 3.6 and later. `max_output_tokens` is 2048 because Gemini 3.x models spend part of the limit on internal reasoning.
+- **Quota:** free-tier keys have low rate limits. A `429 RESOURCE_EXHAUSTED` error means the quota was used up; see Google's [rate limits](https://aistudio.google.com/docs/rate-limits) page, or enable billing. The app falls back to deterministic text meanwhile.
+- **Data sent to Google:** the structured claim fields and retrieved policy clauses go to the Gemini model. The vector database does not use Gemini: it embeds with a local Ollama server or the offline LSA fallback, so search text stays on your side. Check this against your data-protection obligations before using real patient data.
+- **Changing the model:** set `GEMINI_MODEL` (for example to `gemini-3.8-flash`); no code change is needed.
+- **Verify:** process a claim; the analysis should show `"model": "gemini-3.6-flash"` and `"is_ai": true`.
 
 ## Three views (open `/`)
 - **Patient**: cover left, ongoing treatment (found from history), standing pre-approval and sessions left, request status in plain words, recent treatments and payments.
@@ -48,7 +74,9 @@ Automatic approval within these limits is a policy decision (`fast-track-policy-
 
 ## Vector database and semantic search (`lib/vector_db.py`)
 Policy clauses (`data/policy_clauses`) plus a plain-language glossary (`data/glossary.json`: how people phrase things, e.g. "stretcher van" for ambulance) are embedded and stored in a persistent **Chroma** collection (`.vectordb/`, cosine distance, via `langchain-chroma`). The collection name carries a fingerprint of the content and embedder, so changed clauses or a new embedder rebuild automatically (about 8 s at first start; a warm-up thread runs at server start).
-- **Embeddings**: Ollama `nomic-embed-text` (`ollama pull nomic-embed-text`) when the server is running; otherwise an offline fallback, LSA (TF-IDF over words and character n-grams, reduced with TruncatedSVD, L2-normalised). The UI sidebar shows which one is active.
+- **Embeddings**: Ollama `nomic-embed-text` (`ollama pull nomic-embed-text`) when the server is running; otherwise an offline fallback, LSA (TF-IDF over words and character n-grams, reduced with TruncatedSVD, L2-normalised). The UI sidebar shows which one is active. The vector database stays on Ollama and LSA; only the language-model calls in `lib/llm.py` use Gemini.
+  - Settings: `OLLAMA_BASE_URL` (default `http://localhost:11434`) and `OLLAMA_EMBED_MODEL` (default `nomic-embed-text`).
+  - **In Docker, Ollama is not part of the compose file**, so the container uses the offline LSA fallback unless it can reach an Ollama server. To use Ollama from the container, run Ollama on the host and set `OLLAMA_BASE_URL=http://host.docker.internal:11434` for the `api` service (on Linux also add `extra_hosts: ["host.docker.internal:host-gateway"]`).
 - **Retrieval** (`hybrid_clauses`, used by the claims graph): BM25 and vector search are merged by weighted reciprocal rank fusion (BM25 weight 1, vector weight 2). A LangChain `BaseRetriever` wraps it.
 - **Evaluate**: `python eval_retrieval.py` (a development set used to pick the weights, and a held-out set written afterwards).
 
@@ -58,7 +86,7 @@ Offline LSA results here (recall@3 / MRR):
 | development (24 queries) | 0.75 / 0.72 | 1.00 / 0.93 | 0.88 / 0.83 |
 | held-out (12 queries) | 0.75 / 0.69 | 0.83 / 0.69 | 0.83 / 0.69 |
 
-Read these with care: the glossary and the queries were written by the same author, so the numbers are optimistic; 12 queries is a small sample; and hybrid did **not** beat vector alone on either set, so the weights are a judgement, not a proven gain. The neural embedder was not tested here (no Ollama or model downloads in the sandbox).
+Read these with care: the glossary and the queries were written by the same author, so the numbers are optimistic; 12 queries is a small sample; and hybrid did **not** beat vector alone on either set, so the weights are a judgement, not a proven gain. The neural embedder (Ollama) was not tested here (no Ollama or model downloads in the sandbox).
 
 ## Console (Stitch-style UI)
 `static/` is a dependency-free SPA in the dark "Clinical Adjudication Engine" style from the supplied Stitch export (tokens, inline icons). Adjudicator tabs: Claims worklist, Adjudication bench (ledger, clauses, pipeline trace, retrieval), Session queue, Patient 360, Network 360, Fast-track, Rules, Audit; plus Patient and Network hospital views; layout works down to 390 px. Fonts load from Google Fonts when online and fall back to system fonts. The bench has no line-edit screen yet (the edit API exists). Checked in Chromium only.
@@ -66,6 +94,9 @@ Read these with care: the glossary and the queries were written by the same auth
 ## Flow
 supervisor → extract → fraud_screen → coverage → adjudicator → critic (one send-back) → human (pauses) → settle → memory.
 `POST /api/claims/{id}/run`, then `POST /api/claims/{id}/decision` with `{action: approve|edit|reject, approver, level}`.
+
+## Docker and deployment
+See `README-docker.md` for building the image, `docker run`, `docker compose up --build -d` (API, Prometheus, Grafana), sharing the image, and troubleshooting. Compose passes `GEMINI_MODEL` to the `api` service and loads `GEMINI_API_KEY` and `ADJUDICATOR_KEY` from `.env`. Semantic search in the container runs on the offline LSA fallback unless an Ollama server is reachable (see the vector database section). On Render, set the same variables in the service's **Environment** tab; Render does not read a `.env` file from the repository.
 
 ## Deliberate differences from the original
 - Waiting-period rules are checked independently (the original skipped one: CLM-004, CLM-044 differ).
@@ -76,7 +107,7 @@ supervisor → extract → fraud_screen → coverage → adjudicator → critic 
 - Outside those, the calculator matches the TS output exactly (differential test on 80 claims).
 
 ## Limits of the new views
-Demo access control only: patients are chosen by policy number, hospitals by name, adjudicators by an API key (`ADJUDICATOR_KEY`, default `demo-key`; level is self-declared). Real use needs OTP sign-in for patients and SSO for staff. Thresholds (1.25x, 80% steady rhythm, 4 sessions) are reasonable defaults, not tuned on real data. Dialysis, chemotherapy and physiotherapy tariffs are illustrative, and whether each is payable under Arogya Sanjeevani is assumed, not checked against the policy wording. Hospital claim counts are about 8 each, so claim flag rates are noisy. Requests live in memory and reset on restart. The browser UI was checked in Chromium only.
+Demo access control only: patients are chosen by policy number, hospitals by name, adjudicators by an API key (`ADJUDICATOR_KEY`, default `demo-key`; level is self-declared). Real use needs OTP sign-in for patients and SSO for staff. Thresholds (1.25x, 80% steady rhythm, 4 sessions) are reasonable defaults, not tuned on real data. Dialysis, chemotherapy and physiotherapy tariffs are illustrative, and whether each is payable under Arogya Sanjeevani is assumed, not checked against the policy wording. Hospital claim counts are about 8 each, so claim flag rates are noisy. Requests live in memory and reset on restart. The browser UI was checked in Chromium only. Gemini API quotas and rate limits apply to the model calls; when they are exceeded the app falls back to deterministic text.
 
 ## Not ported / not verified
-React UI, PDF generator, Java bridge, the TS data generator (replaced by `data/synthetic_claims.json`). The live model paths (Ollama via LangChain and DSPy, LangSmith upload) and the Docker build were not run here; there was no Ollama server, model weights or Docker here. Category rules are tuned to the synthetic vocabulary, so expect DSPy fallbacks on real bills.
+React UI, PDF generator, Java bridge, the TS data generator (replaced by `data/synthetic_claims.json`). The live Gemini model paths (LangChain and DSPy), the Ollama embedding path, LangSmith upload and the Docker build were not exercised in the environment where this README was prepared; confirm them on your deployment using the checks above. The DSPy call uses LiteLLM's `gemini/` provider, so if it does not recognise the model name, upgrade `dspy` and `litellm`. Category rules are tuned to the synthetic vocabulary, so expect DSPy fallbacks on real bills.
