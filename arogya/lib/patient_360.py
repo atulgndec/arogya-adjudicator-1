@@ -16,9 +16,10 @@ from statistics import median
 from .tariff_db import evaluate_tariff
 from decimal import Decimal
 
-DATA = json.loads((Path(__file__).parent.parent / "data" / "patient_history.json").read_text())
-AS_OF = date.fromisoformat(DATA["asOf"])             # the demo's "today", so results are reproducible
-HOSPITALS: dict[str, dict] = DATA["hospitals"]
+DATA = json.loads((Path(__file__).parent.parent / "data" / "patient_history.json").read_text()) # load the demo data once, for all requests
+AS_OF = date.fromisoformat(DATA["asOf"])             # the demo's "today", so results are reproducible 
+# AS_OF is used to calculate remaining cover, so it should be the same as the date used in the demo data
+HOSPITALS: dict[str, dict] = DATA["hospitals"] # hospital info is used to check if a hospital is in-network, and to get its city and tier
 MIN_EPISODES, AMOUNT_TOLERANCE = 4, 1.25
 SEV = {"high": 3, "medium": 2, "low": 1}
 

@@ -36,23 +36,41 @@ EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 GLOSSARY = json.loads((DATA / "glossary.json").read_text())
 
 
+# LSA embeddings are used as a fallback when the Ollama model is not available. They are generated using
+# TF-IDF vectorization followed by truncated SVD to reduce dimensionality. This allows for
+# semantic search capabilities even when a neural model is not accessible, although the quality of
+# the embeddings may be lower compared to a neural model. The LSA embeddings are fitted on
+# the corpus of policy text and a glossary of terms, which helps capture the relationships between words
+# and phrases in the context of the knowledge base.
+
 class LsaEmbeddings(Embeddings):
     """Dense semantic vectors from TF-IDF + truncated SVD. Fitted once on the corpus, then used for documents and queries alike."""
-
+    # The `LsaEmbeddings` class implements a fallback embedding mechanism using Latent Semantic Analysis (LSA) 
+    # when a neural model is not available. It leverages TF-IDF vectorization to capture the importance of words 
+    # in the corpus and then applies truncated Singular Value Decomposition (SVD) to reduce the dimensionality 
+    # of the resulting vectors. This allows for efficient semantic search capabilities, even in the absence of 
+    # a neural model.
+    
+    # The `__init__` method initializes the LSA embeddings by fitting the TF-IDF vectorizer and truncated SVD
+    # on the provided corpus.
     def __init__(self, corpus: list[str], dims: int = 40) -> None:
         self.vec = FeatureUnion([("w", TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True, stop_words="english")),
                                  ("c", TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), sublinear_tf=True))])
         x = self.vec.fit_transform(corpus)
         self.svd = TruncatedSVD(n_components=min(dims, x.shape[0] - 1, x.shape[1] - 1), random_state=7).fit(x)
-
+    
+    # The `_embed` method takes a list of texts and returns their corresponding LSA embeddings as a list of lists
+    # of floats.
     def _embed(self, texts: list[str]) -> list[list[float]]:
         v = self.svd.transform(self.vec.transform(texts))
         v /= np.linalg.norm(v, axis=1, keepdims=True) + 1e-9
         return v.tolist()
 
+    # The `embed_documents` method takes a list of texts and returns their corresponding LSA embeddings.
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return self._embed(texts)
 
+    # The `embed_query` method takes a single text query and returns its corresponding LSA embedding.
     def embed_query(self, text: str) -> list[float]:
         return self._embed([text])[0]
 

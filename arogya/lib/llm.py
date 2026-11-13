@@ -1,7 +1,9 @@
 """Model calls. Replaces the three /api/gemini/* handlers in server.ts with LangChain chains.
 
-* Open-source model via Ollama (default llama3.1:8b; set OLLAMA_MODEL, OLLAMA_BASE_URL). If the server is not reachable,
-  every function returns its deterministic fallback, so the pipeline never depends on a model.
+* Model: Google Gemini (default gemini-3.6-flash) through langchain-google-genai.
+  Set GEMINI_API_KEY (or GOOGLE_API_KEY) and, optionally, GEMINI_MODEL.
+  If no key is set, or a model call fails, every function returns its deterministic fallback,
+  so the pipeline never depends on a model.
 * LangSmith tracing is on when LANGSMITH_TRACING=true; inputs and outputs are masked before they leave.
 * Claim data goes to the model inside <claim_data> tags with a system rule that it is data, never instructions.
 """
@@ -9,9 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-from functools import lru_cache
-
-import httpx
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -35,33 +34,48 @@ REPORT = ChatPromptTemplate.from_messages([
 ])
 
 
-OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 
-@lru_cache(maxsize=1)
-def _ollama_up() -> bool:
-    """One quick check that the server is running and has the model pulled (cached for the process)."""
-    try:
-        tags = httpx.get(f"{OLLAMA_URL}/api/tags", timeout=1.5).json()
-        return any(m["name"].split(":")[0] == OLLAMA_MODEL.split(":")[0] for m in tags.get("models", []))
-    except Exception:
-        return False
+def _api_key() -> str:
+    """Read the key at call time so a key added to the environment later is picked up."""
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+
+
+def _gemini_ready() -> bool:
+    """True when a key is configured. No network call is made here; a bad key or an outage
+    is handled by the fallback in _run()."""
+    return bool(_api_key())
+
+
+# Backward-compatible names, in case other modules (server.py, health endpoint, UI sidebar)
+# still import them from the Ollama version of this file.
+OLLAMA_MODEL = GEMINI_MODEL
+_ollama_up = _gemini_ready
 
 
 def get_model():
-    if not _ollama_up():
+    if not _gemini_ready():
         return None
-    from langchain_ollama import ChatOllama
-    return ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_URL, temperature=0.2, num_predict=600)
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    return ChatGoogleGenerativeAI(
+        model=GEMINI_MODEL,
+        google_api_key=_api_key(),
+        temperature=0.2,
+        # Gemini 3.x models "think" first and thinking tokens count against this limit,
+        # so it is set well above the 600 used for Ollama to avoid cut-off answers.
+        max_output_tokens=2048,
+        timeout=30,
+        max_retries=1,
+    )
 
 
 def configure_dspy() -> bool:
-    """Point DSPy at the same local model (used by the line-classifier fallback)."""
-    if not _ollama_up():
+    """Point DSPy at the same Gemini model (used by the line-classifier fallback)."""
+    if not _gemini_ready():
         return False
     import dspy
-    dspy.configure(lm=dspy.LM(f"ollama_chat/{OLLAMA_MODEL}", api_base=OLLAMA_URL, api_key=""))
+    dspy.configure(lm=dspy.LM(f"gemini/{GEMINI_MODEL}", api_key=_api_key()))
     return True
 
 
@@ -75,20 +89,23 @@ def _run(prompt, variables: dict, fallback: str) -> dict:
         LLM_CALLS.labels("fallback").inc()
         return {"text": fallback, "model": "deterministic-rules", "is_ai": False}
     try:
-        text = (prompt | model | StrOutputParser()).invoke(variables)
+        text = (prompt | model | StrOutputParser()).invoke(variables)  # invoke the model with the prompt and variables
         LLM_CALLS.labels("live").inc()
-        return {"text": text, "model": OLLAMA_MODEL, "is_ai": True}
+        return {"text": text, "model": GEMINI_MODEL, "is_ai": True}
     except Exception as e:                                   # network, quota, bad key: never block the claim
         LLM_CALLS.labels("fallback").inc()
         return {"text": fallback, "model": f"deterministic-rules (model call failed: {type(e).__name__})", "is_ai": False}
 
 
+# traceable wrappers for the two LLM calls, with input/output masking for LangSmith
 @traceable(name="llm_analyze_case", process_inputs=_hide, process_outputs=_hide)
 def analyze_case(*, triggers: list[str], clauses: str, lessons: str, claim_data: dict, fallback: str) -> dict:
+    # analysis of a claim, with fallback if the model is not reachable
     return _run(ANALYZE, {"triggers": "\n".join(triggers), "clauses": clauses, "lessons": lessons or "none",
                           "claim_data": json.dumps(claim_data, default=str)}, fallback)
 
 
 @traceable(name="llm_settlement_report", process_inputs=_hide, process_outputs=_hide)
 def settlement_report(*, claim_data: dict, worksheet: dict, fallback: str) -> dict:
+    # generate a settlement report, with fallback if the model is not reachable
     return _run(REPORT, {"claim_data": json.dumps(claim_data, default=str), "worksheet": json.dumps(worksheet, default=str)}, fallback)

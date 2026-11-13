@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 R = random.Random(2026)
-AS_OF = date(2026, 10, 26)
+AS_OF = date(2026, 10, 29)
 claims = json.loads((Path(__file__).parent.parent / "arogya/data/synthetic_claims.json").read_text())
 HOSP = {}
 for c in claims:

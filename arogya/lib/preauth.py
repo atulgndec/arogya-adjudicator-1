@@ -16,15 +16,16 @@ from .claims_db import claims_db, now
 from .claims_metrics import PREAUTH
 
 # what the patient and the hospital see (no reasons: they could be used to learn how to avoid a check)
-PUBLIC = {"cleared": "Approved", "approved": "Approved", "awaiting": "Being reviewed", "held": "Being reviewed: we will call the registered number", "rejected": "Not approved: contact your insurer"}
+PUBLIC = {"cleared": "Approved", "approved": "Approved", "awaiting": "Being reviewed", "held": "Being reviewed: we will call the registered number", "rejected": "Not approved: contact your insurer"} 
 SENIOR_NOTE_MIN = 10
 
+# Pre-authorisation is a stateful service.
 
 class PreAuth:
     def __init__(self) -> None:
         self.reset()
 
-    def reset(self) -> None:
+    def reset(self) -> None: # reset the state of the service, for testing
         self.requests: dict[str, dict] = {}
         self.standing: dict[str, dict] = {}
         self.audit: list[dict] = []
@@ -33,12 +34,12 @@ class PreAuth:
             self.submit(dict(r))
 
     # ---- submit -------------------------------------------------------------------------
-    def _prior(self, policy: str) -> list[dict]:
+    def _prior(self, policy: str) -> list[dict]: # return the patient's history of episodes and accepted sessions, for pattern checking
         return [*p360.get_patient(policy)["episodes"], *self.accepted.get(policy, [])]
 
-    def recommend(self, policy: str, procedure: str) -> dict | None:
+    def recommend(self, policy: str, procedure: str) -> dict | None: # if the patient has a regular treatment pattern, return the recommended standing authorisation terms
         reg = next((r for r in p360.regular_treatments(self._prior(policy)) if r["procedure"] == procedure), None)
-        p = p360.get_patient(policy)
+        p = p360.get_patient(policy) # get the patient again, in case the policy is not in the regular treatment data (e.g. a new policy)
         if not reg or not p:
             return None
         sessions = max(2, round(30 / reg["typicalGapDays"]))          # at least two, so monthly chemotherapy is worth a standing approval
@@ -49,7 +50,7 @@ class PreAuth:
     def _active_auth(self, policy, procedure, hospital, service_date, amount):
         return next((a for a in self.standing.values() if a["policy"] == policy and a["procedure"] == procedure and not a["revoked"] and hospital in a["hospitals"]
                      and a["sessionsLeft"] > 0 and service_date <= a["validTo"] and amount <= a["perSessionCap"]), None)
-
+    # submit a pre-authorisation request, return the adjudicator's decision (or hold it for review)
     def submit(self, req: dict) -> dict:
         p = p360.get_patient(req["policy"])
         if not p:
@@ -59,7 +60,7 @@ class PreAuth:
         flags = p360.check_session(p, prior, req["hospital"], req["procedure"], req["serviceDate"], req["amount"], req["contactId"])
         if self.cover_left(req["policy"]) < req["amount"]:
             flags.append({"code": "COVER_LOW", "severity": "high", "text": "Remaining sum insured is lower than this session's amount."})
-        worst = max((p360.SEV[f["severity"]] for f in flags), default=0)
+        worst = max((p360.SEV[f["severity"]] for f in flags), default=0) # 0=none, 1=low, 2=medium, 3=high
         rec = self.recommend(req["policy"], req["procedure"])
         auth = self._active_auth(req["policy"], req["procedure"], req["hospital"], req["serviceDate"], req["amount"])
         if worst >= 3:

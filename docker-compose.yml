@@ -2,20 +2,42 @@ services:
   api:
     build: .
     ports: ["8000:8000"]
-    env_file: [.env]
-    environment: {OLLAMA_BASE_URL: "http://ollama:11434"}
-  ollama:
-    image: ollama/ollama
-    ports: ["11434:11434"]
-    volumes: ["ollama:/root/.ollama"]   # then: docker compose exec ollama ollama pull llama3.1:8b
+    env_file: [.env]                    # GEMINI_API_KEY (keep secrets here)
+    environment:
+      GEMINI_MODEL: "gemini-3.6-flash"  
+    volumes:
+      - vectordb:/app/.vectordb         # keeps the vector index between restarts
+
   prometheus:
     image: prom/prometheus
     volumes: ["./ops/prometheus.yml:/etc/prometheus/prometheus.yml"]
     ports: ["9090:9090"]
+    depends_on: [api]
+
   grafana:
     image: grafana/grafana
     ports: ["3000:3000"]
     volumes:
       - ./ops/grafana/provisioning:/etc/grafana/provisioning
       - ./ops/grafana/dashboards:/var/lib/grafana/dashboards
-volumes: {ollama: {}}
+    depends_on: [prometheus]
+
+volumes:
+  vectordb:
+
+# # services:
+# #   api:
+# #     build: .
+# #     ports: ["8000:8000"]
+# #     env_file: [.env]
+# #     environment: {OLLAMA_BASE_URL: "https://googleapis.com/", OLLAMA_MODEL: "gemini-3.6-flash"}
+# #   prometheus:
+# #     image: prom/prometheus
+# #     volumes: ["./ops/prometheus.yml:/etc/prometheus/prometheus.yml"]
+# #     ports: ["9090:9090"]
+# #   grafana:
+# #     image: grafana/grafana
+# #     ports: ["3000:3000"]
+# #     volumes:
+# #       - ./ops/grafana/provisioning:/etc/grafana/provisioning
+# #       - ./ops/grafana/dashboards:/var/lib/grafana/dashboards

@@ -4,7 +4,8 @@ from contextlib import contextmanager
 from decimal import Decimal
 import time
 
-from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client import Counter, Gauge, Histogram 
+# Counter: cumulative, Gauge: current value, Histogram: distribution of values
 
 CLAIMS = Counter("arogya_claims_total", "Claims that finished the workflow", ["outcome"])
 NODE_SECONDS = Histogram("arogya_node_seconds", "Time spent in each graph node", ["node"], buckets=(0.005, 0.02, 0.1, 0.5, 2, 10))
@@ -13,23 +14,24 @@ SETTLED = Counter("arogya_settled_rupees_total", "Rupees settled")
 FRAUD_FLAGS = Counter("arogya_fraud_flags_total", "Fraud and attack flags raised", ["type"])
 CRITIC_REVISIONS = Counter("arogya_critic_revisions_total", "Times the critic sent a worksheet back")
 DECISIONS = Counter("arogya_decisions_total", "Adjudicator decisions", ["action", "level"])
-PENDING = Gauge("arogya_approvals_pending", "Claims waiting for an adjudicator")
+PENDING = Gauge("arogya_approvals_pending", "Claims waiting for an adjudicator") # pending approvals, by level
 LLM_CALLS = Counter("arogya_llm_calls_total", "Model calls", ["mode"])          # live | fallback | skipped
 PREAUTH = Counter("arogya_preauth_total", "Pre-authorisation requests by result", ["result"])
 PREAPPROVAL = Counter("arogya_claim_preapproval_total", "Claim pre-approvals by result", ["result"])
-ADJUSTMENT = Counter("arogya_preapproval_adjustment_rupees_total", "Rupees moved when a bill was reconciled with its pre-approval", ["direction"])
-LESSONS = Gauge("arogya_lessons", "Playbook lessons by status", ["status"])
+ADJUSTMENT = Counter("arogya_preapproval_adjustment_rupees_total", "Rupees moved when a bill was reconciled with its pre-approval", ["direction"]) # up | down
+LESSONS = Gauge("arogya_lessons", "Playbook lessons by status", ["status"]) # learned | pending | skipped
 
-
+# counter for the number of times a claim was sent back to the adjudicator for revision, by level
 @contextmanager
-def timed(node: str):
+def timed(node: str): # Context manager to time a node and record the duration in the NODE_SECONDS histogram.
     t = time.perf_counter()
     try:
         yield
     finally:
-        NODE_SECONDS.labels(node).observe(time.perf_counter() - t)
+        NODE_SECONDS.labels(node).observe(time.perf_counter() - t) # record the duration in the histogram for this node
 
-
+# summarize the dataset: number of claims, total claimed, total deducted, total payable, repudiated claims, 
+# room breaches, senior approvals needed, fraud flags, deductions by reason
 def summarize(claims, worksheets, reports) -> dict:
     """Dataset summary (what the original's computeActualClaimsMetrics showed), computed, not hard-coded."""
     by_reason: Count = Count()

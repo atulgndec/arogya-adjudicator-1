@@ -13,6 +13,8 @@ import secrets
 from ..types.adjudication import AdjudicationLine, AdjudicationWorksheet, ExtractedClaim, ReflexionLesson
 from .claims_db import now
 
+# Seed lessons are hard-coded here, but in a real system they would be stored in a database and 
+# updated by reviewers.
 SEED = [
     ReflexionLesson(id="LESSON-001", title="Medicines are exempt from the room-rent proportional cut", clause_cited="Clause 4.1 Note b",
                     trigger_condition="Room rent exceeds the cap", lesson_rule="Reimburse medicines at 100% even when other lines are cut proportionally.",
@@ -32,7 +34,8 @@ SEED = [
                     reviewed_by="TPA Supervisor", applies_when={"day_care": True}),
 ]
 
-
+# a lesson applies to a claim if all of its applies_when conditions are met; 
+# any missing condition is ignored
 def applies(l: ReflexionLesson, c: ExtractedClaim, ws: AdjudicationWorksheet | None) -> bool:
     w, text = l.applies_when, f"{c.diagnosis} {c.procedure_name}".lower()
     checks = [
@@ -44,7 +47,8 @@ def applies(l: ReflexionLesson, c: ExtractedClaim, ws: AdjudicationWorksheet | N
     ]
     return all(checks)
 
-
+# ReflexionEngine is a singleton that keeps the lessons in memory, with counters for how many claims 
+# each lesson has fired on and how many times adjudicators have edited those claims.
 class ReflexionEngine:
     def __init__(self) -> None:
         self.reset()

@@ -32,17 +32,17 @@ class ClaimsDatabase:
             self.record(rec)
 
     # ---- ledger -------------------------------------------------------------------------
-    def record(self, rec: dict) -> None:
-        self.history.setdefault(rec["policyNumber"], []).append(rec)
-        self.seen_bills.add(rec["billNumber"].strip().upper())
+    def record(self, rec: dict) -> None: #  record a claim settlement in the ledger and bill register
+        self.history.setdefault(rec["policyNumber"], []).append(rec) # append to the policy's history
+        self.seen_bills.add(rec["billNumber"].strip().upper()) # add to the seen bills set
 
-    def policy_history(self, policy_no: str) -> list[dict]:
+    def policy_history(self, policy_no: str) -> list[dict]: # return the list of claim records for a policy, or an empty list if none
         return self.history.get(policy_no, [])
 
-    def is_bill_duplicate(self, bill_no: str) -> bool:
+    def is_bill_duplicate(self, bill_no: str) -> bool: # return True if the bill number has been seen before, else False. Case-insensitive, ignores whitespace.
         return bool(bill_no) and bill_no.strip().upper() in self.seen_bills
 
-    def used_sublimits(self, policy_no: str) -> dict[str, Decimal]:
+    def used_sublimits(self, policy_no: str) -> dict[str, Decimal]: # return a dict of sublimit names to total amounts used for settled claims under this policy
         totals: dict[str, Decimal] = {}
         for r in self.policy_history(policy_no):
             if r["status"] == "settled":
@@ -51,23 +51,30 @@ class ClaimsDatabase:
         return totals
 
     # ---- approval tokens ----------------------------------------------------------------
+    # Tokens are issued to an approver for a specific claim and worksheet hash, and are valid until the worksheet 
+    # is edited (which changes the hash). The token is a short HMAC of the claim ID, worksheet hash, approver, and 
+    # approval level, using a secret key. The token is stored in memory with its metadata.
     def issue_token(self, claim_id: str, ws_hash: str, approver: str, level: str) -> str:
         sig = hmac.new(SECRET.encode(), f"{claim_id}|{ws_hash}|{approver}|{level}".encode(), hashlib.sha256).hexdigest()[:20]
-        token = f"TOKEN-APP-{level[:3].upper()}-{sig}"
-        self.tokens[token] = {"claim_id": claim_id, "ws_hash": ws_hash, "approver": approver, "level": level, "at": now()}
+        token = f"TOKEN-APP-{level[:3].upper()}-{sig}" # short token for the approver and level
+        self.tokens[token] = {"claim_id": claim_id, "ws_hash": ws_hash, "approver": approver, "level": level, "at": now()} # store the token with its metadata
         return token
-
+    # the token is valid if it exists in the tokens dict, and its claim ID and worksheet hash match the current ones. 
+    # If the worksheet is edited, the hash changes and the token becomes invalid.
     def token_valid(self, token: str | None, claim_id: str, ws_hash: str) -> bool:
         rec = self.tokens.get(token or "")
         return bool(rec) and rec["claim_id"] == claim_id and rec["ws_hash"] == ws_hash
 
     # ---- the gated tool -------------------------------------------------------------------
+    # settle_claim is gated to the Settlement agent, and requires a valid token for the exact worksheet hash. 
+    # It checks that the claimant matches the policy record, that the claim has not been settled before, and then records
+    # the settlement with a unique settlement ID.
     def settle_claim(self, *, caller: str, claim_id: str, policy_no: str, claimant: str, expected_name: str,
                      token: str | None, ws_hash: str, amount: Decimal, bill_no: str, sublimits_used: dict | None = None) -> dict:
         """Only the Settlement agent may call this, with a token bound to this exact worksheet hash."""
-        def deny(why: str) -> dict:
+        def deny(why: str) -> dict: # deny access with a reason
             return {"success": False, "error": why}
-        if caller != "Settlement":
+        if caller != "Settlement": # only the Settlement agent may call this
             return deny(f"ACCESS DENIED: settle_claim is gated to the Settlement agent (caller: {caller}).")
         if not self.token_valid(token, claim_id, ws_hash):
             return deny("INVALID APPROVAL: no valid approval token for this worksheet version (an edit voids earlier approvals).")

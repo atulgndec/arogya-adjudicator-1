@@ -44,30 +44,34 @@ SENILE = ["senile cataract", "osteoarthritis", "knee replacement", "bph", "degen
 SHORT_STAY = ["gastroenteritis", "dehydration", "viral fever", "cataract"]
 STENT_PRICE_CAP = Decimal(38200)       # NPPA ceiling used by the original
 
-
+# The following functions are used to detect fraud in insurance claims based on the extracted claim 
+# data and predefined rules.
 def any_match(patterns: list[str], text: str) -> bool:
     return any(re.search(p, text, I) for p in patterns)
 
-
+# The flag function creates a FraudFlag object with the provided parameters.
 def flag(fid: str, type_: str, severity: str, title: str, desc: str, clause: str, evidence: str, group: str | None = None) -> FraudFlag:
     return FraudFlag(id=fid, type=type_, severity=severity, title=title, description=desc, clause_cited=clause, evidence=evidence, attack_vector_category=group)
 
-
+# The detect_fraud function analyzes an extracted claim and generates a fraud report based on various 
+# checks and rules.
 def detect_fraud(c: ExtractedClaim) -> FraudReport:
     flags: list[FraudFlag] = []
-    score = 5
+    score = 5 # starting score for all claims, to avoid zero-score claims being treated as "no fraud" when they are simply unflagged
+    
+    # The add function adds a fraud flag to the list of flags and updates the risk score.
 
     def add(f: FraudFlag, points: int) -> None:
         nonlocal score
         flags.append(f)
         score += points
-
-    used = claims_db.used_sublimits(c.policy_number)
-    dup = claims_db.is_bill_duplicate(c.bill_number)
+    
+    used = claims_db.used_sublimits(c.policy_number) # get the historical sublimit utilization for the policy
+    dup = claims_db.is_bill_duplicate(c.bill_number) # check if the bill number has already been settled
     text = " ".join([c.raw_documents.discharge_summary_text, c.raw_documents.claim_form_text, c.raw_documents.itemised_bill_text,
-                     c.procedure_name, c.diagnosis, *(f"{l.raw_description} {l.normalized_description}" for l in c.line_items)])
-    clinical = f"{c.diagnosis} {c.procedure_name}".lower()
-
+                     c.procedure_name, c.diagnosis, *(f"{l.raw_description} {l.normalized_description}" for l in c.line_items)]) # concatenate all relevant text fields for analysis
+    clinical = f"{c.diagnosis} {c.procedure_name}".lower() # combine diagnosis and procedure name for clinical checks
+    
     if dup:
         add(flag("FLAG-DUP", "duplicate_bill", "high", "Duplicate hospital bill number", f"Bill {c.bill_number} was already settled.",
                  "Clause 10.9", "Matches the bill register."), 65)

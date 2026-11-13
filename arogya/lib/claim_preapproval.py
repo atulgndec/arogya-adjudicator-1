@@ -33,49 +33,52 @@ COVER_BUFFER = 1.2            # cover left must be at least this multiple of the
 WINDOW_DAYS = 7               # treatment must start within this many days of the planned date
 POLICY = "fast-track-policy-v1"
 
-
+# ---- helpers --------------------------------------------------------------------------------
 def r(x) -> int:
     return int(rupee(Decimal(str(x))))
 
-
+# policy room-rent cap is the lower of the contract and the policy limit, multiplied by ROOM_CAP_PCT
 def room_cap(p: dict) -> int:
     return r(min(ROOM_CAP_PCT * Decimal(p["sumInsured"]), ROOM_CAP_MAX))
 
-
+# copay is a fixed percentage of the total, rounded to the nearest rupee
 def copay(total: int) -> int:
     return r(Decimal(total) * COPAY_RATE)
 
-
+# claim pre-approvals are kept in memory only, keyed by a random ID. They are not persisted, and are lost on restart.
 class ClaimPreApprovals:
     def __init__(self) -> None:
         self.reset()
 
     def reset(self) -> None:
         self.items: dict[str, dict] = {}
-
+    
+    # allowed room days are limited to the discharge summary, and the rate to the contract and policy cap. 
+    # The rest of the bill must be close to the assessed package.
     # ---- before treatment ---------------------------------------------------------------------
     def assess(self, p: dict, hospital: str, procedure: str, room_category: str, room_days: int) -> dict | None:
-        pkg, rate = provider_db.package_rate(hospital, procedure), provider_db.room_rate(hospital, room_category) if room_days else 0
+        pkg, rate = provider_db.package_rate(hospital, procedure), provider_db.room_rate(hospital, room_category) if room_days else 0 # package and room rate from the provider database 
+        # check the policy cap only if there is a contracted rate; if there is none, the hospital can charge what it wants and the patient will pay the difference
         if pkg is None or rate is None:
             return None
-        rate_used = min(rate, room_cap(p))
-        total = pkg + rate_used * room_days
+        rate_used = min(rate, room_cap(p)) # room rate is limited by the policy cap
+        total = pkg + rate_used * room_days # total is the assessed package plus the room charges
         return {"package": pkg, "roomCategory": room_category, "roomDays": room_days, "roomRateContracted": rate, "roomRateAssessed": rate_used, "roomTotal": rate_used * room_days,
                 "total": total, "copay": copay(total), "payable": total - copay(total), "ratesSyncedAt": provider_db.synced_at()}
 
     def eligibility(self, p: dict, hospital: str, procedure: str, service_date: str, contact_id: str, assessed: dict | None, room_cap_ok: bool) -> list[dict]:
         policy, checks = p["policy"], []
-
+        # check the patient's history and the hospital's network status, and return a list of checks with their results
         def chk(code, ok, text):
             checks.append({"code": code, "ok": bool(ok), "text": text})
 
-        prior = [*p["episodes"], *preauth.accepted.get(policy, [])]
-        reg = next((x for x in p360.regular_treatments(prior) if x["procedure"] == procedure), None)
-        chk("REGULAR_TREATMENT", reg, f"Regular {procedure}: {reg['episodes']} sessions on record." if reg else f"No regular {procedure} pattern in the history (needs at least {p360.MIN_EPISODES} steady sessions).")
-        chk("USUAL_HOSPITAL", reg and hospital in reg["usualHospitals"], f"{hospital} is the patient's usual hospital for this treatment." if reg and hospital in reg["usualHospitals"] else f"{hospital} is not the patient's usual hospital for this treatment.")
+        prior = [*p["episodes"], *preauth.accepted.get(policy, [])] # prior episodes from the patient record and any accepted pre-approvals
+        reg = next((x for x in p360.regular_treatments(prior) if x["procedure"] == procedure), None) # check if the patient has a regular treatment pattern for this procedure
+        chk("REGULAR_TREATMENT", reg, f"Regular {procedure}: {reg['episodes']} sessions on record." if reg else f"No regular {procedure} pattern in the history (needs at least {p360.MIN_EPISODES} steady sessions).") # check if the patient has a regular treatment pattern for this procedure
+        chk("USUAL_HOSPITAL", reg and hospital in reg["usualHospitals"], f"{hospital} is the patient's usual hospital for this treatment." if reg and hospital in reg["usualHospitals"] else f"{hospital} is not the patient's usual hospital for this treatment.") # check if the hospital is the patient's usual hospital for this treatment
         net = next((n for n in network_overview() if n["hospital"] == hospital), None)
         # pricing and claim-flag reasons only: one patient's odd sessions are not the hospital's fault
-        why = [t for t in (net["reasons"] if net else []) if "own pattern" not in t]
+        why = [t for t in (net["reasons"] if net else []) if "own pattern" not in t] # check if the hospital is in the network and if there are any reasons for pricing or claim-flag review
         chk("NETWORK_HOSPITAL", net and not why, f"{hospital} is a network hospital with no pricing or claim-flag review." if net and not why else f"{hospital} is under review or not in the network: {'; '.join(why) or 'not in the network'}.")
         bad = [t for t in p360.patient_360(policy)["timeline"] if t["flags"]]
         chk("NO_PAST_FLAGS", not bad, "No past session was out of the patient's pattern." if not bad else f"{len(bad)} past session(s) were out of the patient's pattern.")
